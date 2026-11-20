@@ -1,0 +1,128 @@
+name: deploy
+# Plan on every pull request (read-only role). Apply from main or a manual run through a protected GitHub environment.
+# Authentication is GitHub OIDC through the Landing Zone identity provider: no stored AWS keys.
+#
+# Per GitHub environment (dev, test, prod) set these environment VARIABLES (not secrets, nothing here is sensitive):
+#   AWS_PLAN_ROLE_ARN / AWS_APPLY_ROLE_ARN  output "github_deploy_roles" of the first (local) apply
+#   AWS_REGION                              Landing Zone primary Region (af-south-1)
+#   TF_STATE_BUCKET / TF_STATE_REGION       Landing Zone state bucket and its Region
+#   TFVARS                                  contents of environments/<env>/terraform.tfvars
+on:
+  pull_request:
+    paths: ["**.tf", "lambda/**", "modules/**", "environments/**", ".github/workflows/deploy.yml"]
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Environment to deploy
+        type: choice
+        options: [dev, test, prod]
+        default: dev
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'dev' }}
+  cancel-in-progress: false
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+env:
+  TF_IN_AUTOMATION: "true"
+jobs:
+  plan:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.13"
+          terraform_wrapper: false
+      - name: Check AWS configuration
+        id: check-aws
+        shell: bash
+        run: |
+          if [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.AWS_PLAN_ROLE_ARN }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "AWS plan variables not configured; skipping AWS steps for public repo."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.check-aws.outputs.skip == 'false'
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Prepare configuration
+        if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/ci-config.sh dev
+        env:
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
+          TFVARS: ${{ vars.TFVARS }}
+      - if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/tf.sh dev init -input=false
+      - name: Plan
+        if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/tf.sh dev plan -input=false -lock-timeout=5m -no-color -out=plan.tfplan | tee plan.txt
+      - name: Comment the plan
+        if: steps.check-aws.outputs.skip == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('plan.txt')) return;
+            const plan = fs.readFileSync('plan.txt', 'utf8').split('\n').slice(-40).join('\n');
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number,
+              body: '### Plan (dev)\n```\n' + plan + '\n```' });
+  apply:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "~> 1.13"
+          terraform_wrapper: false
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install boto3
+      - run: python3 -I -m unittest discover -s tests
+      - name: Check AWS configuration
+        id: check-aws
+        shell: bash
+        run: |
+          if [ -z "${{ vars.AWS_REGION }}" ] || [ -z "${{ vars.AWS_APPLY_ROLE_ARN }}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "AWS apply variables not configured; skipping AWS steps for public repo."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: aws-actions/configure-aws-credentials@v4
+        if: steps.check-aws.outputs.skip == 'false'
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Prepare configuration
+        if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/ci-config.sh "${ENVIRONMENT}"
+        env:
+          ENVIRONMENT: ${{ github.event.inputs.environment || 'dev' }}
+          TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+          TF_STATE_REGION: ${{ vars.TF_STATE_REGION }}
+          TFVARS: ${{ vars.TFVARS }}
+      - if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/tf.sh "${ENVIRONMENT}" init -input=false
+        env: { ENVIRONMENT: "${{ github.event.inputs.environment || 'dev' }}" }
+      - name: Apply
+        if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/tf.sh "${ENVIRONMENT}" apply -input=false -auto-approve -lock-timeout=10m
+        env: { ENVIRONMENT: "${{ github.event.inputs.environment || 'dev' }}" }
+      - name: Show outputs
+        if: steps.check-aws.outputs.skip == 'false'
+        run: scripts/tf.sh "${ENVIRONMENT}" output
+        env: { ENVIRONMENT: "${{ github.event.inputs.environment || 'dev' }}" }

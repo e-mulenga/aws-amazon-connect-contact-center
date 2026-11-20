@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (git-ignored). IDENTITY ONLY: shared settings live in environments/common.tfvars.
+
+environment = "dev"
+owner       = "Platform Engineering"
+cost_center = "LAB001"
+
+# Landing Zone state location: the Landing Zone output "terraform_state" prints these three values.
+landing_zone_state_bucket = "<landing-zone-state-bucket>"
+landing_zone_state_key    = "landing-zone/dev/terraform.tfstate"
+landing_zone_state_region = "<landing-zone-state-bucket-region>"
+
+# Optional: create the GitHub Actions OIDC roles for this repository.
+# github_repository = "<github-user>/aws-amazon-connect-contact-center"
+
+# Optional: claim a number (billed monthly) and point it at the inbound flow.
+# claim_phone_number = true

@@ -1,0 +1,18 @@
+# State and local config (never commit)
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+.build/
+environments/*/backend.hcl
+environments/*/terraform.tfvars
+*.auto.tfvars
+
+# Python
+__pycache__/
+*.pyc
+
+# Local
+.env
+*.pem
+.demo-users.json
